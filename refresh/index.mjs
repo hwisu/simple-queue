@@ -4,16 +4,8 @@ const CLUSTER_ENDPOINT = 'cluster.endpoint.com'
 const CLUSTER_NAME = 'cluster_name'
 const WAIT_LIST = 'wait_list_name'
 
-const USER_CAPACITY = 1000;
-const RETRY_DELAY = 1000; //ms
 const RETRY_TIMES = 3;
-
-const jsonString = (count, status) => {
-    return JSON.stringify({
-        "waitCount": count,
-        "status": status,
-    })
-}
+const RETRY_DELAY = 500;
 
 const portAndHost = (shard, node) => {
     return {
@@ -28,25 +20,20 @@ const promiseDelay = async (ms) => {
     });
 }
 
-const getBody = (rankingOfUser) => {
-    return (rankingOfUser < USER_CAPACITY) ?
-        jsonString(0, "OK") :
-        jsonString(rankingOfUser + 1 - USER_CAPACITY, "WAIT")
-}
-
 const retryFunctionWithRedis = async (redis, func) => {
     for (let i = 0; i < RETRY_TIMES; i++) {
         const result = await Promise.race([
             promiseDelay(RETRY_DELAY),
             func,
         ])
-        if (!isNaN(result) && result >= 0) {
-            return result
+        if (result === "OK") {
+            return {statusCode: 200}
         }
     }
-    return 0
+    return {
+        statusCode: 201,
+    };
 }
-
 
 export const handler = async (event) => {
     const redis = new Redis.Cluster([
@@ -54,16 +41,15 @@ export const handler = async (event) => {
     ]);
 
     const userId = JSON.parse(event.body).userId
+    const now = Date.now()
 
-    if(!userId) return
+    // add user to waitlist
+    await retryFunctionWithRedis(redis, redis.zadd(WAIT_LIST, 'LT', now, userId));
 
-    return retryFunctionWithRedis(redis, redis.zrank(WAIT_LIST, userId)).then(
-        (rankingOfUser) => {
+    // set token that will expire
+    retryFunctionWithRedis(redis, redis.set(userId, 'OK', 'EX', 20)).then(
+        (result) => {
             redis.disconnect()
-            const body = getBody(rankingOfUser)
-            return {
-                statusCode: 200,
-                body: body
-            };
+            return result
         })
 };
