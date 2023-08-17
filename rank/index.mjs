@@ -1,69 +1,47 @@
-import Redis from 'ioredis'
+import Redis from 'ioredis';
 
-const CLUSTER_ENDPOINT = 'cluster.endpoint.com'
-const CLUSTER_NAME = 'cluster_name'
-const WAIT_LIST = 'wait_list_name'
-
+const CLUSTER_ENDPOINT = 'cluster.endpoint.com';
+const CLUSTER_NAME = 'cluster_name';
+const WAIT_LIST = 'wait_list_name';
 const USER_CAPACITY = 1000;
-const RETRY_DELAY = 1000; //ms
-const RETRY_TIMES = 3;
 
-const jsonString = (count, status) => {
-    return JSON.stringify({
-        "waitCount": count,
-        "status": status,
-    })
-}
+const jsonString = (count, status) => JSON.stringify({ waitCount: count, status });
 
-const portAndHost = (shard, node) => {
-    return {
-        port: 6379,
-        host: `${CLUSTER_NAME}-${shard}-${node}.${CLUSTER_ENDPOINT}`,
-    }
-}
+const portAndHost = (shard, node) => ({ port: 6379, host: `${CLUSTER_NAME}-${shard}-${node}.${CLUSTER_ENDPOINT}` });
 
-const promiseDelay = async (ms) => {
-    return new Promise((resolve) => {
-        setTimeout(resolve, ms);
-    });
-}
+const getUserId = (event) => {
+    const userId = JSON.parse(event.body)?.userId;
+    return userId || null;
+};
 
-const getBody = (rankingOfUser) => {
-    return (rankingOfUser < USER_CAPACITY) ?
-        jsonString(0, "OK") :
-        jsonString(rankingOfUser + 1 - USER_CAPACITY, "WAIT")
-}
+const handleError = (error) => {
+    console.error('Error:', error);
+    return { statusCode: 500, body: 'Internal Server Error' };
+};
 
-const retryFunctionWithRedis = async (redis, func) => {
-    for (let i = 0; i < RETRY_TIMES; i++) {
-        const result = await Promise.race([
-            promiseDelay(RETRY_DELAY),
-            func,
-        ])
-        if (!isNaN(result) && result >= 0) {
-            return result
-        }
-    }
-    return 0
-}
-
+const buildResponse = (statusCode, body) => ({ statusCode, body });
 
 export const handler = async (event) => {
-    const redis = new Redis.Cluster([
-        portAndHost("0001", "001")
-    ]);
+    const redis = new Redis.Cluster([portAndHost("0001", "001")]);
 
-    const userId = JSON.parse(event.body).userId
+    const userId = getUserId(event);
 
-    if(!userId) return
+    if (!userId) {
+        redis.disconnect();
+        return buildResponse(400, 'Missing userId');
+    }
 
-    return retryFunctionWithRedis(redis, redis.zrank(WAIT_LIST, userId)).then(
-        (rankingOfUser) => {
-            redis.disconnect()
-            const body = getBody(rankingOfUser)
-            return {
-                statusCode: 200,
-                body: body
-            };
-        })
+    try {
+        const rankingOfUser = await redis.zrank(WAIT_LIST, userId);
+
+        const waitCount = rankingOfUser < USER_CAPACITY ? 0 : rankingOfUser + 1 - USER_CAPACITY;
+        const status = rankingOfUser < USER_CAPACITY ? 'OK' : 'WAIT';
+        const responseBody = jsonString(waitCount, status);
+
+        return buildResponse(200, responseBody);
+    } catch (error) {
+        return handleError(error);
+    } finally {
+        redis.disconnect();
+    }
 };
